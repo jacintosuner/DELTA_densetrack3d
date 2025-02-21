@@ -6,6 +6,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from einops import rearrange
+import mediapy as media
+import cv2
 
 from densetrack3d.datasets.custom_data import read_data, read_data_with_depthcrafter
 from densetrack3d.models.densetrack3d.densetrack3d import DenseTrack3D
@@ -99,62 +101,68 @@ if __name__ == "__main__":
     predictor = DensePredictor3D(model=model)
     predictor = predictor.eval().cuda()
 
-    video, videodepth, videodisp = read_data_with_depthcrafter(full_path=args.video_path)
+    # video, videodepth, videodisp = read_data_with_depthcrafter(full_path=args.video_path)
 
-    if videodepth is None:
+    video = media.read_video("datasets/demo_18/video.mp4")
+    videodepth = np.load("datasets/demo_18/depth_pred.npy")
 
-        os.sys.path.append(os.path.abspath(os.path.join(BASE_DIR, "submodules", "UniDepth")))
-        from unidepth.models import UniDepthV2
-        from unidepth.utils import colorize, image_grid
+    for idx, frame in enumerate(video):
+        cv2.imwrite(f"datasets/demo_18/color/frame_{idx}.jpg", frame)
+
+    # if videodepth is None:
+
+    #     os.sys.path.append(os.path.abspath(os.path.join(BASE_DIR, "submodules", "UniDepth")))
+    #     from unidepth.models import UniDepthV2
+    #     from unidepth.utils import colorize, image_grid
 
         
-        unidepth_model = UniDepthV2.from_pretrained(f"lpiccinelli/unidepth-v2-vitl14")
-        unidepth_model = unidepth_model.eval().to(device)
+    #     unidepth_model = UniDepthV2.from_pretrained(f"lpiccinelli/unidepth-v2-vitl14")
+    #     unidepth_model = unidepth_model.eval().to(device)
 
-        print("Run Unidepth")
-        videodepth = predict_unidepth(video, unidepth_model)
-        np.save(os.path.join(args.video_path, "depth_pred.npy"), videodepth)
+    #     print("Run Unidepth")
+    #     videodepth = predict_unidepth(video, unidepth_model)
+    #     np.save(os.path.join(args.video_path, "depth_pred.npy"), videodepth)
 
-    if args.use_depthcrafter:
-        if videodisp is None:
-            os.sys.path.append(os.path.abspath(os.path.join(BASE_DIR, "submodules", "DepthCrafter")))
-            from depthcrafter.depth_crafter_ppl import DepthCrafterPipeline
-            from depthcrafter.unet import DiffusersUNetSpatioTemporalConditionModelDepthCrafter
-            from diffusers.training_utils import set_seed
+    # if args.use_depthcrafter:
+    #     if videodisp is None:
+    #         os.sys.path.append(os.path.abspath(os.path.join(BASE_DIR, "submodules", "DepthCrafter")))
+    #         from depthcrafter.depth_crafter_ppl import DepthCrafterPipeline
+    #         from depthcrafter.unet import DiffusersUNetSpatioTemporalConditionModelDepthCrafter
+    #         from diffusers.training_utils import set_seed
 
-            unet = DiffusersUNetSpatioTemporalConditionModelDepthCrafter.from_pretrained(
-                "tencent/DepthCrafter",
-                low_cpu_mem_usage=True,
-                torch_dtype=torch.float16,
-            )
-            # load weights of other components from the provided checkpoint
-            depth_crafter_pipe = DepthCrafterPipeline.from_pretrained(
-                "stabilityai/stable-video-diffusion-img2vid-xt",
-                unet=unet,
-                torch_dtype=torch.float16,
-                variant="fp16",
-            )
+    #         unet = DiffusersUNetSpatioTemporalConditionModelDepthCrafter.from_pretrained(
+    #             "tencent/DepthCrafter",
+    #             low_cpu_mem_usage=True,
+    #             torch_dtype=torch.float16,
+    #         )
+    #         # load weights of other components from the provided checkpoint
+    #         depth_crafter_pipe = DepthCrafterPipeline.from_pretrained(
+    #             "stabilityai/stable-video-diffusion-img2vid-xt",
+    #             unet=unet,
+    #             torch_dtype=torch.float16,
+    #             variant="fp16",
+    #         )
 
-            depth_crafter_pipe.to("cuda")
-            # enable attention slicing and xformers memory efficient attention
-            try:
-                depth_crafter_pipe.enable_xformers_memory_efficient_attention()
-            except Exception as e:
-                print(e)
-                print("Xformers is not enabled")
-            depth_crafter_pipe.enable_attention_slicing()
+    #         depth_crafter_pipe.to("cuda")
+    #         # enable attention slicing and xformers memory efficient attention
+    #         try:
+    #             depth_crafter_pipe.enable_xformers_memory_efficient_attention()
+    #         except Exception as e:
+    #             print(e)
+    #             print("Xformers is not enabled")
+    #         depth_crafter_pipe.enable_attention_slicing()
 
-            print("Run DepthCrafter")
-            videodisp = predict_depthcrafter(video, depth_crafter_pipe)
-            np.save(os.path.join(args.video_path, "depth_depthcrafter.npy"), videodisp)
+    #         print("Run DepthCrafter")
+    #         videodisp = predict_depthcrafter(video, depth_crafter_pipe)
+    #         np.save(os.path.join(args.video_path, "depth_depthcrafter.npy"), videodisp)
 
-        videodepth = least_square_align(videodepth, videodisp)
+    #     videodepth = least_square_align(videodepth, videodisp)
 
     video = torch.from_numpy(video).permute(0, 3, 1, 2).cuda()[None].float()
     videodepth = torch.from_numpy(videodepth).unsqueeze(1).cuda()[None].float()
 
     vid_name = args.video_path.split("/")[-1]
-    save_dir = os.path.join(args.output_path, vid_name)
+    save_dir = os.path.join(args.output_path, "demo_18")
     os.makedirs(save_dir, exist_ok=True)
     print(f"Save results to {save_dir}")
 
@@ -174,23 +182,35 @@ if __name__ == "__main__":
         pickle.dump(trajs_3d_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     if args.viz_sparse:
+
+        mask = cv2.imread("datasets/demo_18/mask.png", cv2.IMREAD_GRAYSCALE)
+        mask = cv2.resize(mask, (512,384), interpolation=cv2.INTER_NEAREST)
+        # mask = mask.reshape(-1).astype(bool)
+        kernel = np.ones((3,3),np.uint8)
+        erosion = cv2.erode(mask, kernel, iterations = 1)
+        edges = mask - erosion
+        valid_mask = mask & (~edges)
+        valid_mask = valid_mask.reshape(-1).astype(bool)
+
         print("Visualize sparse 2D tracking")
         W = video.shape[-1]
         visualizer_2d = Visualizer(
-            save_dir="results/demo", fps=10, show_first_frame=0, linewidth=int(1 * W / 512), tracks_leave_trace=10
+            save_dir="results/demo", fps=10, show_first_frame=0, linewidth=int(1 * W / 512), tracks_leave_trace=0
         )
 
         trajs_uv = out_dict["trajs_uv"]
         trajs_vis = out_dict["vis"]
         dense_reso = out_dict["dense_reso"]
 
-        sparse_trajs_uv = rearrange(trajs_uv, "b t (h w) c -> b t h w c", h=dense_reso[0], w=dense_reso[1])
-        sparse_trajs_uv = sparse_trajs_uv[:, :, :: args.downsample, :: args.downsample]
-        sparse_trajs_uv = rearrange(sparse_trajs_uv, "b t h w c -> b t (h w) c")
+        sparse_trajs_uv = trajs_uv[:, :, valid_mask, :]
+        sparse_trajs_vis = trajs_vis[:, :, valid_mask]
+        # sparse_trajs_uv = rearrange(trajs_uv, "b t (h w) c -> b t h w c", h=dense_reso[0], w=dense_reso[1])
+        # sparse_trajs_uv = sparse_trajs_uv[:, :, :: args.downsample, :: args.downsample]
+        # sparse_trajs_uv = rearrange(sparse_trajs_uv, "b t h w c -> b t (h w) c")
 
-        sparse_trajs_vis = rearrange(trajs_vis, "b t (h w) -> b t h w", h=dense_reso[0], w=dense_reso[1])
-        sparse_trajs_vis = sparse_trajs_vis[:, :, :: args.downsample, :: args.downsample]
-        sparse_trajs_vis = rearrange(sparse_trajs_vis, "b t h w -> b t (h w)")
+        # sparse_trajs_vis = rearrange(trajs_vis, "b t (h w) -> b t h w", h=dense_reso[0], w=dense_reso[1])
+        # sparse_trajs_vis = sparse_trajs_vis[:, :, :: args.downsample, :: args.downsample]
+        # sparse_trajs_vis = rearrange(sparse_trajs_vis, "b t h w -> b t (h w)")
 
         video2d_viz = visualizer_2d.visualize(
             video, sparse_trajs_uv, sparse_trajs_vis[..., None], filename="demo", save_video=False
