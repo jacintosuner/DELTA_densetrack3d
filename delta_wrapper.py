@@ -62,7 +62,9 @@ class DeltaTrackerWrapper:
         window_len: int = 16,
         stride: int = 4,
         upsample_factor: int = 4,
-        device: str = "cuda"
+        device: str = "cuda",
+        gpu_id: int = 0,
+        debug: bool = False
     ):
         """Initialize DeltaTracker with model parameters and settings.
 
@@ -73,13 +75,32 @@ class DeltaTrackerWrapper:
             window_len: Window length for tracking
             stride: Model stride
             upsample_factor: Upsampling factor
-            device: Device to run the model on
+            device: Device to run the model on ('cuda' or 'cpu')
+            gpu_id: GPU device ID to use when device is 'cuda' (default: 0)
+            debug: Whether to print debug information (default: False)
         """
+        self.debug = debug
+        if self.debug:
+            print("Initializing DeltaTrackerWrapper...")
+        
+        if device == "cuda":
+            if not torch.cuda.is_available():
+                print("CUDA not available, falling back to CPU")
+                device = "cpu"
+            else:
+                if gpu_id >= torch.cuda.device_count():
+                    print(f"GPU {gpu_id} not available, using GPU 0")
+                    gpu_id = 0
+                torch.cuda.set_device(gpu_id)
+                print(f"Using GPU {gpu_id}: {torch.cuda.get_device_name()}")
+        
         self.device = torch.device(device)
         self.use_fp16 = use_fp16
         self.base_dir = os.getcwd()
         
         # Initialize DenseTrack3D model
+        if self.debug:
+            print("Loading DenseTrack3D model...")
         self.model = DenseTrack3D(
             stride=stride,
             window_len=window_len,
@@ -90,6 +111,8 @@ class DeltaTrackerWrapper:
         )
         
         # Load checkpoint
+        if self.debug:
+            print(f"Loading checkpoint from {ckpt_path}...")
         with open(ckpt_path, "rb") as f:
             state_dict = torch.load(f, map_location="cpu")
             if "model" in state_dict:
@@ -97,8 +120,13 @@ class DeltaTrackerWrapper:
         self.model.load_state_dict(state_dict, strict=False)
         
         # Initialize predictor
+        if self.debug:
+            print("Initializing predictor...")
         self.predictor = DensePredictor3D(model=self.model)
         self.predictor = self.predictor.eval().to(self.device)
+        
+        if self.debug:
+            print("Initialization complete!")
 
     @torch.inference_mode()
     def predict_unidepth(self, video: np.ndarray) -> np.ndarray:
@@ -110,22 +138,33 @@ class DeltaTrackerWrapper:
         Returns:
             Predicted depth maps of shape (T, H, W)
         """
+        if self.debug:
+            print("Starting UniDepth prediction...")
+        
         # Import UniDepth here to avoid dependency if not used
         os.sys.path.append(os.path.abspath(os.path.join(self.base_dir, "submodules", "UniDepth")))
         from unidepth.models import UniDepthV2
         
+        if self.debug:
+            print("Loading UniDepth model...")
         unidepth_model = UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vitl14")
         unidepth_model = unidepth_model.eval().to(self.device)
         
         video_torch = torch.from_numpy(video).permute(0, 3, 1, 2).to(self.device)
         depth_pred = []
         
+        if self.debug:
+            print(f"Processing video chunks ({len(video)} frames)...")
         chunks = torch.split(video_torch, 32, dim=0)
-        for chunk in chunks:
+        for i, chunk in enumerate(chunks):
+            if self.debug:
+                print(f"Processing chunk {i+1}/{len(chunks)}...")
             predictions = unidepth_model.infer(chunk)
             depth_pred_ = predictions["depth"].squeeze(1).cpu().numpy()
             depth_pred.append(depth_pred_)
             
+        if self.debug:
+            print("UniDepth prediction complete!")
         return np.concatenate(depth_pred, axis=0)
 
     @torch.inference_mode()
@@ -138,10 +177,15 @@ class DeltaTrackerWrapper:
         Returns:
             Predicted depth maps of shape (T, H, W)
         """
+        if self.debug:
+            print("Starting DepthCrafter prediction...")
+        
         os.sys.path.append(os.path.abspath(os.path.join(self.base_dir, "submodules", "DepthCrafter")))
         from depthcrafter.depth_crafter_ppl import DepthCrafterPipeline
         from depthcrafter.unet import DiffusersUNetSpatioTemporalConditionModelDepthCrafter
 
+        if self.debug:
+            print("Loading DepthCrafter model...")
         unet = DiffusersUNetSpatioTemporalConditionModelDepthCrafter.from_pretrained(
             "tencent/DepthCrafter",
             low_cpu_mem_usage=True,
@@ -161,6 +205,8 @@ class DeltaTrackerWrapper:
             print(f"Xformers not enabled: {e}")
         pipe.enable_attention_slicing()
 
+        if self.debug:
+            print("Processing video frames...")
         frames, ori_h, ori_w = read_video(video, max_res=1024)
         res = pipe(
             frames,
@@ -174,6 +220,8 @@ class DeltaTrackerWrapper:
             track_time=False,
         ).frames[0]
 
+        if self.debug:
+            print("Post-processing depth maps...")
         res = res.sum(-1) / res.shape[-1]
         res = (res - res.min()) / (res.max() - res.min())
         res = F.interpolate(
@@ -182,6 +230,8 @@ class DeltaTrackerWrapper:
             mode="nearest"
         ).squeeze(1).numpy()
         
+        if self.debug:
+            print("DepthCrafter prediction complete!")
         return res
 
     def process_video(
@@ -338,6 +388,8 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stride", type=int, default=4, help="Model stride")
     parser.add_argument("--upsample_factor", type=int, default=4, help="Upsampling factor")
     parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"], help="Device to run inference on")
+    parser.add_argument("--gpu_id", type=int, default=0, help="GPU device ID to use when device is 'cuda'")
+    parser.add_argument("--debug", action="store_true", help="Print debug information during execution")
     
     return parser
 
@@ -355,7 +407,9 @@ def main():
         window_len=args.window_len,
         stride=args.stride,
         upsample_factor=args.upsample_factor,
-        device=args.device
+        device=args.device,
+        gpu_id=args.gpu_id,
+        debug=args.debug
     )
     
     # Process video
