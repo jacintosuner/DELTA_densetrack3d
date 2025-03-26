@@ -1,22 +1,33 @@
 import os
-import argparse
-import pickle
-import mediapy as media
-import numpy as np
-import torch
-import torch.nn.functional as F
-from einops import rearrange
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
+import cv2
+import json
+import os
+from dataclasses import dataclass, field
+
+import hydra
+import numpy as np
+import pickle
+
+import torch
+from omegaconf import OmegaConf
+
+from tqdm import tqdm
+
+import torch.nn.functional as F
+
+import argparse
+
+
+from densetrack3d.models.geometry_utils import least_square_align
 from densetrack3d.datasets.custom_data import read_data, read_data_with_depthcrafter
 from densetrack3d.models.densetrack3d.densetrack3d import DenseTrack3D
-from densetrack3d.models.geometry_utils import least_square_align
-from densetrack3d.models.predictor.predictor import Predictor3D
+from densetrack3d.models.predictor.dense_predictor import DensePredictor3D
 from densetrack3d.utils.depthcrafter_utils import read_video
-from densetrack3d.utils.visualizer import Visualizer
 
-
-BASE_DIR = os.getcwd()
-
+device = torch.device("cuda")
 
 @torch.inference_mode()
 def predict_unidepth(video, model):
@@ -57,7 +68,6 @@ def predict_depthcrafter(video, pipe):
 
     return res
 
-
 def get_args_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", type=str, default="checkpoints/densetrack3d.pth", help="checkpoint path")
@@ -66,20 +76,16 @@ def get_args_parser():
     parser.add_argument(
         "--use_depthcrafter", action="store_true", help="whether to use depthcrafter as input videodepth"
     )
-    parser.add_argument("--viz_sparse", type=bool, default=True, help="whether to viz sparse tracking")
-    # parser.add_argument("--downsample", type=int, default=16, help="downsample factor of sparse tracking")
-    parser.add_argument("--upsample_factor", type=int, default=4, help="model stride")
-    parser.add_argument("--grid_size", type=int, default=20, help="model stride")
-    parser.add_argument("--query_frame", type=int, default=0, help="frame to sample tracking queries")
-    parser.add_argument("--use_fp16", action="store_true", help="whether to use fp16 precision")
 
     return parser
-
 
 if __name__ == "__main__":
 
     parser = get_args_parser()
     args = parser.parse_args()
+
+    # NOTE force using DepthCrafter: we found that the depthcrafter depth is more accurate than the unidepth depth for sfm
+    args.use_depthcrafter = True
 
     print("Create DenseTrack3D model")
     model = DenseTrack3D(
@@ -98,8 +104,12 @@ if __name__ == "__main__":
             state_dict = state_dict["model"]
     model.load_state_dict(state_dict, strict=False)
 
-    predictor = Predictor3D(model=model)
+    predictor = DensePredictor3D(model=model)
     predictor = predictor.eval().cuda()
+
+    vid_name = args.video_path.split("/")[-1]
+    save_dir = os.path.join(args.output_path, vid_name)
+    os.makedirs(save_dir, exist_ok=True)
 
     video, videodepth, videodisp = read_data_with_depthcrafter(full_path=args.video_path)
 
@@ -109,7 +119,7 @@ if __name__ == "__main__":
         from unidepth.models import UniDepthV2
         from unidepth.utils import colorize, image_grid
 
-        device = torch.device("cuda")
+        
         unidepth_model = UniDepthV2.from_pretrained(f"lpiccinelli/unidepth-v2-vitl14")
         unidepth_model = unidepth_model.eval().to(device)
 
@@ -152,50 +162,82 @@ if __name__ == "__main__":
 
         videodepth = least_square_align(videodepth, videodisp)
 
-    video = torch.from_numpy(video).permute(0, 3, 1, 2).cuda()[None].float()
+
+    max_T = min(100, video.shape[1])
+    stride = 2
+    chunk_size = 16
+
+    
+
+
+
+    video = torch.from_numpy(video).permute(0,3,1,2).cuda()[None].float()
     videodepth = torch.from_numpy(videodepth).unsqueeze(1).cuda()[None].float()
 
-    print("Run SparseTrack3D")
+    
 
-    with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=args.use_fp16):
-        
-        assert args.query_frame >= 0, "query_frame should be >= 0"
-        backward_tracking = True if args.query_frame > 0 else False # if sample from a middle frame, enable backward tracking
+    key_inds = list(range(0, max_T, stride))
 
-        out_dict = predictor(
-                video,
-                videodepth,
-                queries=None,
-                segm_mask=None,
-                grid_size=args.grid_size,
-                grid_query_frame=args.query_frame,
-                backward_tracking=backward_tracking,
-                predefined_intrs=None
+    video = video[:, :max_T]
+    videodepth = videodepth[:, :max_T]
+    total_dict = {}
+    
+    for ind in key_inds:
+        print(f"Densely tracking points at frame {ind}")
+
+        fw_dict, bw_dict = None, None
+        if ind < video.shape[1]:
+            fw_video = video[:, ind:min(ind+chunk_size, video.shape[1])]
+            fw_videodepth = videodepth[:, ind:min(ind+chunk_size, video.shape[1])]
+            fw_out_dict = predictor(
+                fw_video,
+                fw_videodepth,
+                grid_query_frame=0,
             )
 
-    trajs_3d_dict = {k: v[0].cpu().numpy() for k, v in out_dict["trajs_3d_dict"].items()}
+            fw_dict = {
+                'trajs_3d': fw_out_dict["trajs_3d_dict"]["coords"][0].cpu().numpy(),
+                'trajs_uv': fw_out_dict["trajs_uv"][0].cpu().numpy(),
+                'conf': fw_out_dict["conf"][0].cpu().numpy(),
+            }
 
-    vid_name = args.video_path.split("/")[-1]
-    save_dir = os.path.join(args.output_path, vid_name)
-    os.makedirs(save_dir, exist_ok=True)
-    print(f"Save results to {save_dir}")
-    
-    with open(os.path.join(save_dir, f"sparse_3d_track.pkl"), "wb") as handle:
-        pickle.dump(trajs_3d_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        if ind > 0:
+            bw_video = video[:, max(0, ind-chunk_size):ind+1].flip(1)
+            bw_videodepth = videodepth[:, max(0, ind-chunk_size):ind+1].flip(1)
+            bw_out_dict = predictor(
+                bw_video,
+                bw_videodepth,
+                grid_query_frame=0,
+            )
 
-    if args.viz_sparse:
-        print("Visualize sparse 2D tracking")
-        W = video.shape[-1]
-        visualizer_2d = Visualizer(
-            save_dir="results/demo", fps=10, show_first_frame=0, linewidth=int(1 * W / 512), tracks_leave_trace=10
-        )
+            bw_dict = {
+                'trajs_3d': bw_out_dict["trajs_3d_dict"]["coords"][0].cpu().numpy(),
+                'trajs_uv': bw_out_dict["trajs_uv"][0].cpu().numpy(),
+                'conf': bw_out_dict["conf"][0].cpu().numpy(),
+            }
 
-        sparse_trajs_uv = out_dict["trajs_uv"]
-        sparse_trajs_vis = out_dict["vis"]
+        strided_save_dict = {
+            'trajs_3d': {},
+            'trajs_uv': {},
+            'conf': {},
+        }
 
-        video2d_viz = visualizer_2d.visualize(
-            video, sparse_trajs_uv, sparse_trajs_vis[..., None], filename="demo", save_video=False
-        )
+        if fw_dict is not None:
+            for k in fw_dict.keys():
+                for tstep in range(0, chunk_size, stride): # 0,2,4,6
+                    if tstep >= len(fw_dict[k]): break
 
-        video2d_viz = video2d_viz[0].permute(0, 2, 3, 1).cpu().numpy()
-        media.write_video(os.path.join(save_dir, f"sparse_2d_track.mp4"), video2d_viz, fps=10)
+                    strided_save_dict[k][str(ind+tstep)] = fw_dict[k][tstep]
+
+        if bw_dict is not None:
+            for k in bw_dict.keys():
+                for tstep in range(stride, chunk_size, stride):
+                    if tstep >= len(bw_dict[k]): break
+
+                    strided_save_dict[k][str(ind-tstep)] = bw_dict[k][tstep]
+
+        total_dict[str(ind)] = strided_save_dict
+
+    with open(os.path.join(save_dir, 'pred_dict_pairwise.pkl'), 'wb') as handle:
+        pickle.dump(total_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
