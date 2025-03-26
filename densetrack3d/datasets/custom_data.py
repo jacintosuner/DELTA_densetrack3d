@@ -50,7 +50,11 @@ def read_data(data_root="demo_data", name="rollerblade", full_path=None):
         else:
             videodepth = None
 
+    elif os.path.exists(os.path.join(full_path, "depths.npy")):
+        print(f"Read depth: {os.path.join(full_path, 'depths.npy')}")
+        videodepth = np.load(os.path.join(full_path, "depths.npy"))
     elif os.path.exists(os.path.join(full_path, "depth_pred.npy")):
+        print(f"Read depth: {os.path.join(full_path, 'depth_pred.npy')}")
         videodepth = np.load(os.path.join(full_path, "depth_pred.npy"))
     else:
         videodepth = None
