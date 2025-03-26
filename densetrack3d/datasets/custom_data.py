@@ -15,12 +15,63 @@ from einops import rearrange, repeat
 from jaxtyping import Bool, Float, Int64, Shaped
 from PIL import Image
 from torch import Tensor, nn
+from pyk4a import PyK4APlayback
+from pyk4a.calibration import CalibrationType
+
+
+def read_mkv_data(video_path: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Read video and depth data from an MKV file recorded with Azure Kinect.
+    
+    Args:
+        video_path: Path to the MKV file
+        
+    Returns:
+        Tuple containing:
+            - video: numpy array of shape (T, H, W, 3) containing RGB frames
+            - videodepth: numpy array of shape (T, H, W) containing depth frames
+    """
+    playback = PyK4APlayback(video_path)
+    playback.open()
+    
+    video_frames = []
+    depth_frames = []
+    
+    try:
+        while True:
+            capture = playback.get_next_capture()
+            
+            # Get RGB and depth frames
+            rgb_frame = capture.color[:, :, :3][:, :, ::-1]  # BGR to RGB
+            depth_frame = capture.transformed_depth
+            
+            if rgb_frame is not None and depth_frame is not None:
+                video_frames.append(rgb_frame)
+                depth_frames.append(depth_frame)
+                
+    except EOFError:
+        pass  # End of video file reached
+        
+    playback.close()
+    
+    if len(video_frames) > 0:
+        video = np.stack(video_frames)
+        videodepth = np.stack(depth_frames)
+        return video, videodepth
+    else:
+        return None, None
 
 
 def read_data(data_root="demo_data", name="rollerblade", full_path=None):
     if full_path is None:
         full_path = os.path.join(data_root, name)
-
+    
+    # First try to read MKV file if present
+    mkv_path = glob.glob(f"{full_path}/*.mkv")
+    if len(mkv_path) > 0:
+        print(f"Read MKV video: {mkv_path[0]}")
+        return read_mkv_data(mkv_path[0])
+    
+    # Otherwise try MP4 or image sequence
     video_path = glob.glob(f"{full_path}/*.mp4")
     if len(video_path) > 0:
         print(f"Read video: {video_path[0]}")
