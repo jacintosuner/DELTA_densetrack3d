@@ -17,10 +17,11 @@ from PIL import Image
 from torch import Tensor, nn
 
 
-def read_data(data_root="demo_data", name="rollerblade", full_path=None):
+def read_data(data_root="demo_data", name="rollerblade", full_path=None, use_gt_depth=False):
     if full_path is None:
         full_path = os.path.join(data_root, name)
 
+    # Read video data
     video_path = glob.glob(f"{full_path}/*.mp4")
     if len(video_path) > 0:
         print(f"Read video: {video_path[0]}")
@@ -28,45 +29,44 @@ def read_data(data_root="demo_data", name="rollerblade", full_path=None):
     elif os.path.isdir(os.path.join(full_path, "color")):
         rgb_folder = os.path.join(full_path, "color")
         rgb_frames = sorted([f for f in os.listdir(rgb_folder) if f.lower().endswith((".png", ".jpg", ".jpeg"))])
-
         video = []
-
         for rgb_frame in rgb_frames:
             img = cv2.imread(os.path.join(rgb_folder, rgb_frame))
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             video.append(img)
-
         video = np.stack(video)
 
-    if os.path.exists(os.path.join(full_path, "depth")):
-        videodepth = []
-        depth_names = sorted(os.listdir(os.path.join(full_path, "depth")))
-        for depth_name in depth_names:
-            depth = cv2.imread(os.path.join(full_path, "color", depth_name), cv2.IMREAD_ANYDEPTH)
-            videodepth.append(depth)
-
-        if len(videodepth) > 0 and len(video) == len(videodepth):
-            videodepth = np.stack(videodepth)
-        else:
-            videodepth = None
-
-    elif os.path.exists(os.path.join(full_path, "depths.npy")):
-        print(f"Read depth: {os.path.join(full_path, 'depths.npy')}")
-        videodepth = np.load(os.path.join(full_path, "depths.npy"))
-    elif os.path.exists(os.path.join(full_path, "depth_pred.npy")):
-        print(f"Read depth: {os.path.join(full_path, 'depth_pred.npy')}")
-        videodepth = np.load(os.path.join(full_path, "depth_pred.npy"))
+    # Read depth data with priority based on use_gt_depth flag
+    videodepth = None
+    if use_gt_depth:
+        # First try depths.npy
+        if os.path.exists(os.path.join(full_path, "depths.npy")):
+            print(f"Read ground truth depth: {os.path.join(full_path, 'depths.npy')}")
+            videodepth = np.load(os.path.join(full_path, "depths.npy"))
+        # Then try depth folder
+        elif os.path.exists(os.path.join(full_path, "depth")):
+            print("Reading ground truth depth from depth folder")
+            videodepth = []
+            depth_names = sorted(os.listdir(os.path.join(full_path, "depth")))
+            for depth_name in depth_names:
+                depth = cv2.imread(os.path.join(full_path, "depth", depth_name), cv2.IMREAD_ANYDEPTH)
+                videodepth.append(depth)
+            if len(videodepth) > 0 and len(video) == len(videodepth):
+                videodepth = np.stack(videodepth)
     else:
-        videodepth = None
+        # Try predicted depths if not using ground truth
+        if os.path.exists(os.path.join(full_path, "depth_pred.npy")):
+            print(f"Read predicted depth: {os.path.join(full_path, 'depth_pred.npy')}")
+            videodepth = np.load(os.path.join(full_path, "depth_pred.npy"))
 
     return video, videodepth
 
 
-def read_data_with_depthcrafter(data_root="demo_data", name="rollerblade", full_path=None):
+def read_data_with_depthcrafter(data_root="demo_data", name="rollerblade", full_path=None, use_gt_depth=False):
     if full_path is None:
         full_path = os.path.join(data_root, name)
 
-    video, videodepth = read_data(data_root, name, full_path)
+    video, videodepth = read_data(data_root, name, full_path, use_gt_depth)
 
     if os.path.exists(os.path.join(full_path, "depth_depthcrafter.npy")):
         videodisp = np.load(os.path.join(full_path, "depth_depthcrafter.npy"))

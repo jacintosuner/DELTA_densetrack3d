@@ -240,7 +240,8 @@ class DeltaTrackerWrapper:
         output_path: str,
         use_depthcrafter: bool = False,
         viz_sparse: bool = True,
-        downsample: int = 16
+        downsample: int = 16,
+        use_gt_depth: bool = False
     ) -> Dict:
         """Process a video file and generate tracking results.
 
@@ -250,15 +251,19 @@ class DeltaTrackerWrapper:
             use_depthcrafter: Whether to use DepthCrafter for depth estimation
             viz_sparse: Whether to visualize sparse tracking
             downsample: Downsample factor for sparse tracking visualization
+            use_gt_depth: Whether to use ground truth depth from depths.npy or depth folder
 
         Returns:
             Dictionary containing tracking results
         """
         # Read video data
-        video, videodepth, videodisp = read_data_with_depthcrafter(full_path=data_root_path)
+        video, videodepth, videodisp = read_data_with_depthcrafter(
+            full_path=data_root_path,
+            use_gt_depth=use_gt_depth
+        )
         
-        # Get depth if not provided
-        if videodepth is None:
+        # Get depth if not provided and not using ground truth
+        if videodepth is None and not use_gt_depth:
             print("Running UniDepth for depth estimation...")
             videodepth = self.predict_unidepth(video)
             np.save(os.path.join(data_root_path, "depth_pred.npy"), videodepth)
@@ -390,6 +395,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"], help="Device to run inference on")
     parser.add_argument("--gpu_id", type=int, default=0, help="GPU device ID to use when device is 'cuda'")
     parser.add_argument("--debug", action="store_true", help="Print debug information during execution")
+    parser.add_argument("--use_gt_depth", action="store_true", help="Use ground truth depth from depths.npy or depth folder")
     
     return parser
 
@@ -418,7 +424,8 @@ def main():
         output_path=args.output_path,
         use_depthcrafter=args.use_depthcrafter,
         viz_sparse=not args.no_viz_sparse,
-        downsample=args.downsample
+        downsample=args.downsample,
+        use_gt_depth=args.use_gt_depth
     )
     
     print("Processing completed successfully!")
